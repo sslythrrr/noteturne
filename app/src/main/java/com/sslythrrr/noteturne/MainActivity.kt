@@ -1,0 +1,949 @@
+package com.sslythrrr.noteturne
+
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.net.Uri
+import android.os.Bundle
+import android.provider.MediaStore
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Note
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.QrCode
+import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import com.sslythrrr.noteturne.ui.theme.NoteturneTheme
+import kotlinx.serialization.json.Json
+import java.io.OutputStreamWriter
+import androidx.core.view.WindowCompat
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.Color
+import com.google.accompanist.systemuicontroller.rememberSystemUiController
+
+class MainActivity : ComponentActivity() {
+    private lateinit var pinManager: PinManager
+    private var lastPauseTime = 0L
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        pinManager = PinManager(this)
+
+        setContent {
+            var isAppUnlocked by remember { mutableStateOf(false) }
+            var shouldRelock by remember { mutableStateOf(false) }
+
+            LaunchedEffect(shouldRelock) {
+                if (shouldRelock) {
+                    isAppUnlocked = false
+                    shouldRelock = false
+                }
+            }
+
+            NoteturneTheme {
+                val systemUiController = rememberSystemUiController()
+                val darkTheme = isSystemInDarkTheme()
+                SideEffect {
+                    systemUiController.setSystemBarsColor(
+                        color = Color.Transparent,
+                        darkIcons = !darkTheme
+                    )
+                }
+
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    AppContent(
+                        pinManager = pinManager,
+                        isUnlocked = isAppUnlocked,
+                        onUnlock = { isAppUnlocked = true }
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        lastPauseTime = System.currentTimeMillis()
+    }
+}
+
+@Composable
+fun AppContent(
+    pinManager: PinManager,
+    isUnlocked: Boolean,
+    onUnlock: () -> Unit
+) {
+    var unlocked by remember { mutableStateOf(isUnlocked) }
+
+    LaunchedEffect(isUnlocked) {
+        unlocked = isUnlocked
+    }
+
+    if (!pinManager.isPinSet()) {
+        SetupPinScreen(
+            onPinSet = {
+                unlocked = true
+                onUnlock()
+            },
+            pinManager = pinManager
+        )
+    } else if (!unlocked) {
+        UnlockScreen(
+            onUnlock = {
+                unlocked = true
+                onUnlock()
+            },
+            pinManager = pinManager
+        )
+    } else {
+        NotesScreen()
+    }
+}
+
+@Composable
+fun SetupPinScreen(onPinSet: () -> Unit, pinManager: PinManager) {
+    var pin by remember { mutableStateOf("") }
+    var confirmPin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf("") }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "Setup PIN",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Create a 4-digit PIN to secure your notes",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        OutlinedTextField(
+            value = pin,
+            onValueChange = { if (it.length <= 4 && it.all { c -> c.isDigit() }) pin = it },
+            label = { Text("Enter PIN") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            singleLine = true
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        OutlinedTextField(
+            value = confirmPin,
+            onValueChange = { if (it.length <= 4 && it.all { c -> c.isDigit() }) confirmPin = it },
+            label = { Text("Confirm PIN") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            singleLine = true
+        )
+
+        if (error.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Button(
+            onClick = {
+                when {
+                    pin.length != 4 -> error = "PIN must be 4 digits"
+                    pin != confirmPin -> error = "PINs don't match"
+                    else -> {
+                        pinManager.setPin(pin)
+                        onPinSet()
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Set PIN")
+        }
+    }
+}
+
+@Composable
+fun UnlockScreen(onUnlock: () -> Unit, pinManager: PinManager) {
+    var pin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "Noteturne",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Enter PIN to unlock",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        OutlinedTextField(
+            value = pin,
+            onValueChange = {
+                if (it.length <= 4 && it.all { c -> c.isDigit() }) {
+                    pin = it
+                    error = false
+                    if (it.length == 4) {
+                        if (pinManager.verifyPin(it)) {
+                            onUnlock()
+                        } else {
+                            error = true
+                            pin = ""
+                        }
+                    }
+                }
+            },
+            label = { Text("PIN") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            isError = error,
+            singleLine = true
+        )
+
+        if (error) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Incorrect PIN",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NotesScreen(viewModel: NotesViewModel = viewModel()) {
+    val context = LocalContext.current
+    val notes by viewModel.notes.collectAsState()
+
+    var showDialog by remember { mutableStateOf(false) }
+    var showImportDialog by remember { mutableStateOf(false) }
+
+    val scanLauncher = rememberLauncherForActivityResult(
+        contract = ScanContract()
+    ) { result ->
+        result.contents?.let { qrContent ->
+            try {
+                val json = Json { ignoreUnknownKeys = true }
+
+                    val noteExport = json.decodeFromString<NoteExport>(qrContent)
+                    viewModel.importNote(noteExport)
+
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            val options = ScanOptions().apply {
+                setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                setPrompt("Scan QR Code from another Noteturne")
+                setBeepEnabled(false)
+                setOrientationLocked(true)
+            }
+            scanLauncher.launch(options)
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        "Noteturne",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 18.sp
+                    )
+                },
+                actions = {
+                    IconButton(onClick = { showImportDialog = true }) {
+                        Icon(
+                            Icons.Default.FileDownload,
+                            "Import",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    IconButton(onClick = {
+                        when (PackageManager.PERMISSION_GRANTED) {
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.CAMERA
+                            ) -> {
+                                val options = ScanOptions().apply {
+                                    setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                    setPrompt("Scan QR Code")
+                                    setBeepEnabled(false)
+                                    setOrientationLocked(true)
+                                }
+                                scanLauncher.launch(options)
+                            }
+                            else -> {
+                                permissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
+                        }
+                    }) {
+                        Icon(
+                            Icons.Default.QrCodeScanner,
+                            "Scan",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        },
+        floatingActionButton = {
+                FloatingActionButton(
+                    onClick = { showDialog = true }
+                ) {
+                    Icon(Icons.Default.Add, "Add Note")
+                }
+
+        }
+    ) { padding ->
+        if (notes.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Note,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "No notes yet",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Tap + to create one",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(notes, key = { it.id }) { note ->
+                    NoteItem(
+                        note = note,
+                        onDelete = { viewModel.deleteNote(note.id) },
+                        onToggleVisibility = { viewModel.toggleNoteVisibility(note.id) },
+                        onEdit = { newContent -> viewModel.updateNote(note.id, newContent) },
+                        onExport = { viewModel.exportNote(note) }
+                    )
+                }
+            }
+        }
+    }
+
+    if (showDialog) {
+        AddNoteDialog(
+            onDismiss = { showDialog = false },
+            onSave = { content ->
+                viewModel.addNote(content)
+                showDialog = false
+            }
+        )
+    }
+
+    if (showImportDialog) {
+        ImportNoteDialog(
+            onDismiss = { showImportDialog = false },
+            onImport = { noteExport ->
+                viewModel.importNote(noteExport)
+                showImportDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+fun NoteItem(
+    note: Note,
+    onDelete: () -> Unit,
+    onToggleVisibility: () -> Unit,
+    onEdit: (String) -> Unit,
+    onExport: () -> NoteExport
+) {
+    val context = LocalContext.current
+    var showMenu by remember { mutableStateOf(false) }
+    var showQRDialog by remember { mutableStateOf(false) }
+    var showEditDialog by remember { mutableStateOf(false) }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.data?.let { uri ->
+                try {
+                    val json = Json { prettyPrint = true }
+                    val jsonString = json.encodeToString(onExport())
+
+                    context.contentResolver.openOutputStream(uri)?.use { output ->
+                        OutputStreamWriter(output).use { writer ->
+                            writer.write(jsonString)
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(8.dp)
+            ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        onClick = { showEditDialog = true }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = note.timestamp,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+                    IconButton(
+                        onClick = onToggleVisibility,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (note.isDecoded) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = if (note.isDecoded) "Hide" else "Show",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Box {
+                        IconButton(
+                            onClick = { showMenu = true },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "More",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Edit") },
+                                onClick = {
+                                    showMenu = false
+                                    showEditDialog = true
+                                },
+                                leadingIcon = { Icon(Icons.Default.Edit, null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Share as QR") },
+                                onClick = {
+                                    showMenu = false
+                                    showQRDialog = true
+                                },
+                                leadingIcon = { Icon(Icons.Default.QrCode, null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export File") },
+                                onClick = {
+                                    showMenu = false
+                                    val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                                        addCategory(Intent.CATEGORY_OPENABLE)
+                                        type = "application/json"
+                                        putExtra(Intent.EXTRA_TITLE, "ssltyhrrr-${System.currentTimeMillis()}.noteturne")
+                                    }
+                                    exportLauncher.launch(intent)
+                                },
+                                leadingIcon = { Icon(Icons.Default.FileUpload, null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete") },
+                                onClick = {
+                                    showMenu = false
+                                    onDelete()
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        null,
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = if (note.isDecoded) note.decodedContent else note.encodedContent,
+                style = MaterialTheme.typography.bodyMedium,
+                fontSize = 14.sp,
+                fontWeight = if (note.isDecoded) FontWeight.Normal else FontWeight.Light,
+                lineHeight = 20.sp,
+                color = if (note.isDecoded)
+                    MaterialTheme.colorScheme.onSurface
+                else
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+
+    if (showQRDialog) {
+        QRCodeDialog(
+            noteExport = onExport(),
+            onDismiss = { showQRDialog = false }
+        )
+    }
+
+    if (showEditDialog) {
+        EditNoteDialog(
+            currentContent = note.decodedContent,
+            onDismiss = { showEditDialog = false },
+            onSave = { newContent ->
+                onEdit(newContent)
+                showEditDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+fun AddNoteDialog(
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New Note") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("Enter your note") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 3
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (text.isNotBlank()) {
+                        onSave(text)
+                    }
+                },
+                enabled = text.isNotBlank()
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun ImportNoteDialog(
+    onDismiss: () -> Unit,
+    onImport: (NoteExport) -> Unit
+) {
+    val context = LocalContext.current
+    var importedNote by remember { mutableStateOf<NoteExport?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let {
+            try {
+                val jsonString = context.contentResolver.openInputStream(it)?.use { input ->
+                    input.bufferedReader().readText()
+                }
+
+                if (jsonString != null) {
+                    val json = Json { ignoreUnknownKeys = true }
+                    importedNote = json.decodeFromString<NoteExport>(jsonString)
+                    error = null
+                } else {
+                    error = "Failed to read file"
+                }
+            } catch (e: Exception) {
+                error = "Invalid file format"
+                e.printStackTrace()
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Import Note") },
+        text = {
+            Column {
+                if (importedNote == null) {
+                    Text("Select a .noteturne file to import")
+                    if (error != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = error!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                } else {
+                    Text("Note preview:")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = "Encrypted content",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = importedNote!!.encryptedContent.take(50) +
+                                        if (importedNote!!.encryptedContent.length > 50) "..." else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Light
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (importedNote != null) {
+                TextButton(
+                    onClick = {
+                        importedNote?.let { onImport(it) }
+                    }
+                ) {
+                    Text("Import")
+                }
+            } else {
+                TextButton(
+                    onClick = {
+                        importLauncher.launch("application/json")
+                    }
+                ) {
+                    Text("Choose File")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun QRCodeDialog(
+    noteExport: NoteExport,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val json = Json { prettyPrint = false }
+    val jsonString = json.encodeToString(noteExport)
+
+    var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var isGenerating by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(jsonString) {
+        try {
+            if (jsonString.length > 2000) {
+                error = "Note too long for QR code. Use file export instead."
+                isGenerating = false
+            } else {
+                qrBitmap = QRCodeHelper.generateQRCode(jsonString, 512)
+                isGenerating = false
+                if (qrBitmap == null) {
+                    error = "Failed to generate QR code"
+                }
+            }
+        } catch (e: Exception) {
+            error = "Error: ${e.message}"
+            isGenerating = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Share QR Code") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                when {
+                    isGenerating -> {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("Generating QR code...")
+                    }
+                    error != null -> {
+                        Icon(
+                            imageVector = Icons.Default.Error,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = error!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    qrBitmap != null -> {
+                        Image(
+                            bitmap = qrBitmap!!.asImageBitmap(),
+                            contentDescription = "QR Code",
+                            modifier = Modifier.size(300.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Scan this code with another Noteturne app",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (qrBitmap != null) {
+                TextButton(
+                    onClick = {
+                        try {
+                            MediaStore.Images.Media.insertImage(
+                                context.contentResolver,
+                                qrBitmap,
+                                "Noteturne_QR_${System.currentTimeMillis()}",
+                                "QR Code for encrypted note"
+                            )
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                        onDismiss()
+                    }
+                ) {
+                    Text("Save to Gallery")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
+fun EditNoteDialog(
+    currentContent: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var text by remember { mutableStateOf(currentContent) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit Note") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("Note content") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 5
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (text.isNotBlank()) {
+                        onSave(text)
+                    }
+                },
+                enabled = text.isNotBlank()
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
